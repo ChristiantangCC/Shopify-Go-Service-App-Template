@@ -10,6 +10,7 @@ import (
 	"math"
 	"net/http"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -20,6 +21,9 @@ const (
 	// maxTransientRetries bounds how often a request is resent after a
 	// Shopify 5xx or a network error.
 	maxTransientRetries = 3
+	// maxThrottleWait caps the computed leaky-bucket wait, so a very
+	// expensive query cannot stall a caller for minutes.
+	maxThrottleWait = 30 * time.Second
 )
 
 // Client sends Admin API GraphQL requests to the store named on the request's
@@ -81,10 +85,12 @@ var errUnauthorized = errors.New("shopify: unauthorized")
 
 // transientError is a failure that may succeed when resent: a 5xx or 429 from
 // Shopify, or a network error. executed is false when Shopify certainly did
-// not run the request (429), so even a mutation can be resent.
+// not run the request (429), so even a mutation can be resent. retryAfter
+// carries a server-given wait.
 type transientError struct {
-	err      error
-	executed bool
+	err        error
+	executed   bool
+	retryAfter time.Duration
 }
 
 func (e *transientError) Error() string { return e.err.Error() }
@@ -117,7 +123,11 @@ func (c *Client) Do(ctx context.Context, query string, variables map[string]any,
 		var transient *transientError
 		if errors.As(err, &transient) && (retrySafe || !transient.executed) && transientRetries < maxTransientRetries && ctx.Err() == nil {
 			transientRetries++
-			if err := sleep(ctx, c.backoff(transientRetries)); err != nil {
+			wait := c.backoff(transientRetries)
+			if transient.retryAfter > 0 {
+				wait = transient.retryAfter
+			}
+			if err := sleep(ctx, wait); err != nil {
 				return err
 			}
 			continue
@@ -171,7 +181,7 @@ func (c *Client) send(ctx context.Context, shop, query string, variables map[str
 		return nil, errUnauthorized
 	}
 	if res.StatusCode == http.StatusTooManyRequests {
-		return nil, &transientError{err: errors.New("admin api: Shopify answered 429")}
+		return nil, &transientError{err: errors.New("admin api: Shopify answered 429"), retryAfter: retryAfter(res)}
 	}
 	if res.StatusCode >= 500 {
 		return nil, &transientError{err: fmt.Errorf("admin api: Shopify answered %d", res.StatusCode), executed: true}
@@ -184,6 +194,19 @@ func (c *Client) send(ctx context.Context, shop, query string, variables map[str
 		return nil, fmt.Errorf("admin api: %w", err)
 	}
 	return &parsed, nil
+}
+
+// retryAfter reads a Retry-After header of whole seconds, 0 when absent.
+func retryAfter(res *http.Response) time.Duration {
+	seconds, err := strconv.Atoi(res.Header.Get("Retry-After"))
+	if err != nil || seconds < 0 {
+		return 0
+	}
+	wait := time.Duration(seconds) * time.Second
+	if wait > maxThrottleWait {
+		return maxThrottleWait
+	}
+	return wait
 }
 
 // idempotentKey matches an @idempotent(key: ...) directive with a value.
@@ -223,14 +246,19 @@ func isThrottled(errs GraphQLErrors) bool {
 	return false
 }
 
-// throttleWait is how long until the bucket holds enough points for the request.
+// throttleWait is how long until the bucket holds enough points for the
+// request, capped at maxThrottleWait.
 func throttleWait(res *graphqlResponse) time.Duration {
 	cost := res.Extensions.Cost
 	missing := cost.RequestedQueryCost - cost.ThrottleStatus.CurrentlyAvailable
 	if cost.ThrottleStatus.RestoreRate <= 0 || missing <= 0 {
 		return time.Second
 	}
-	return time.Duration(math.Ceil(missing/cost.ThrottleStatus.RestoreRate)) * time.Second
+	wait := time.Duration(math.Ceil(missing/cost.ThrottleStatus.RestoreRate)) * time.Second
+	if wait > maxThrottleWait {
+		return maxThrottleWait
+	}
+	return wait
 }
 
 func sleep(ctx context.Context, d time.Duration) error {

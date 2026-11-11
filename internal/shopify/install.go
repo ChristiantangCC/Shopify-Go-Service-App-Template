@@ -40,8 +40,16 @@ func VerifySessionToken(token, clientID, clientSecret string, now time.Time) (Se
 	if len(parts) != 3 {
 		return claims, errors.New("session token: malformed")
 	}
-	header, err := base64.RawURLEncoding.DecodeString(parts[0])
-	if err != nil || !strings.Contains(string(header), `"HS256"`) {
+	rawHeader, err := base64.RawURLEncoding.DecodeString(parts[0])
+	if err != nil {
+		return claims, errors.New("session token: bad header")
+	}
+	var header struct {
+		Alg string `json:"alg"`
+	}
+	// The algorithm is parsed, not substring-matched, so a crafted header
+	// like {"alg":"none","typ":"HS256"} cannot slip through.
+	if json.Unmarshal(rawHeader, &header) != nil || header.Alg != "HS256" {
 		return claims, errors.New("session token: unexpected algorithm")
 	}
 	mac := hmac.New(sha256.New, []byte(clientSecret))

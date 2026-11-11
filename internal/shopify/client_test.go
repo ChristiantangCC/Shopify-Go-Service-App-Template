@@ -73,6 +73,28 @@ func TestDoRetries(t *testing.T) {
 	}
 }
 
+func TestThrottleWaitIsCapped(t *testing.T) {
+	res := &graphqlResponse{}
+	res.Extensions.Cost.RequestedQueryCost = 1000
+	res.Extensions.Cost.ThrottleStatus.CurrentlyAvailable = 0
+	res.Extensions.Cost.ThrottleStatus.RestoreRate = 1
+	if wait := throttleWait(res); wait != maxThrottleWait {
+		t.Fatalf("wait %v, want the %v cap", wait, maxThrottleWait)
+	}
+}
+
+func TestRetryAfterIsHonoured(t *testing.T) {
+	recorder := httptest.NewRecorder()
+	recorder.Header().Set("Retry-After", "2")
+	if got := retryAfter(recorder.Result()); got != 2*time.Second {
+		t.Fatalf("retryAfter %v", got)
+	}
+	empty := httptest.NewRecorder()
+	if got := retryAfter(empty.Result()); got != 0 {
+		t.Fatalf("retryAfter without header %v", got)
+	}
+}
+
 func TestDoUnauthorizedForgetsToken(t *testing.T) {
 	client, _ := testClient(t, 401)
 	if err := client.Do(forShop(), `query { shop { name } }`, nil, nil); err != ErrNotConnected {
