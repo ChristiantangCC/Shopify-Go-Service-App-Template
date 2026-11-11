@@ -1,6 +1,6 @@
-# One container: no database, no Redis, no workers. The store's access token is
-# fetched when the app is opened in the store's admin and kept, encrypted, in
-# the `data` volume, so it survives restarts and deploys.
+# One container: no database, no Redis, no workers. Each store's access token
+# is fetched when the app is opened in that store's admin and kept, encrypted,
+# in the `data` volume, so it survives restarts and deploys.
 #
 # Put a reverse proxy with HTTPS in front (Caddy, Traefik, a load balancer):
 # Shopify needs https://<your-domain>/ as App URL.

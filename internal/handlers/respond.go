@@ -11,6 +11,8 @@ import (
 )
 
 // Admin is the part of the Shopify client the handlers use (a fake in tests).
+// It works on the store the request is for: pass the request's context, which
+// ProxyShop or APIShop has put the store on.
 type Admin interface {
 	Do(ctx context.Context, query string, variables map[string]any, out any) error
 }

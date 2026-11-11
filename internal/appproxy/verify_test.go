@@ -26,7 +26,7 @@ func itoa(n int64) string { return strconv.FormatInt(n, 10) }
 func serve(t *testing.T, query url.Values) (int, Caller) {
 	t.Helper()
 	var got Caller
-	handler := Verify(VerifyOptions{Secret: secret, Shop: "example-shop.myshopify.com", MaxAge: 5 * time.Minute, Logger: slog.New(slog.NewTextHandler(io.Discard, nil)), Now: func() time.Time { return now }})(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	handler := Verify(VerifyOptions{Secret: secret, Shops: []string{"example-shop.myshopify.com", "second-shop.myshopify.com"}, MaxAge: 5 * time.Minute, Logger: slog.New(slog.NewTextHandler(io.Discard, nil)), Now: func() time.Time { return now }})(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		got, _ = CallerFrom(r.Context())
 	}))
 	recorder := httptest.NewRecorder()
@@ -56,6 +56,13 @@ func TestSignatureMatchesShopifysExamples(t *testing.T) {
 func TestVerifyAcceptsAFreshSignedRequest(t *testing.T) {
 	code, caller := serve(t, signedQuery("example-shop.myshopify.com", now.Add(-time.Minute)))
 	if code != http.StatusOK || caller.CustomerID != "42" || caller.Shop != "example-shop.myshopify.com" {
+		t.Fatalf("code %d caller %+v", code, caller)
+	}
+}
+
+func TestVerifyAcceptsEveryConfiguredShop(t *testing.T) {
+	code, caller := serve(t, signedQuery("second-shop.myshopify.com", now))
+	if code != http.StatusOK || caller.Shop != "second-shop.myshopify.com" {
 		t.Fatalf("code %d caller %+v", code, caller)
 	}
 }

@@ -22,22 +22,24 @@ const (
 	maxTransientRetries = 3
 )
 
-// Client sends Admin API GraphQL requests for one store.
+// Client sends Admin API GraphQL requests to the store named on the request's
+// context (WithShop), with that store's token.
 type Client struct {
-	endpoint   string
+	// endpoint is the GraphQL URL of a store (overridden in tests).
+	endpoint   func(shop string) string
 	tokens     *TokenStore
-	shop       string
 	httpClient *http.Client
 	// backoff is the wait before transient retry n (1, 2, 3).
 	backoff func(n int) time.Duration
 }
 
-// NewClient creates an Admin API client that uses the stored token.
-func NewClient(shop, apiVersion string, tokens *TokenStore) *Client {
+// NewClient creates an Admin API client that uses the stored tokens.
+func NewClient(apiVersion string, tokens *TokenStore) *Client {
 	return &Client{
-		endpoint:   fmt.Sprintf("https://%s/admin/api/%s/graphql.json", shop, apiVersion),
+		endpoint: func(shop string) string {
+			return fmt.Sprintf("https://%s/admin/api/%s/graphql.json", shop, apiVersion)
+		},
 		tokens:     tokens,
-		shop:       shop,
 		httpClient: &http.Client{Timeout: 30 * time.Second},
 		backoff:    func(n int) time.Duration { return time.Duration(1<<(n-1)) * 500 * time.Millisecond },
 	}
@@ -88,22 +90,28 @@ type transientError struct {
 func (e *transientError) Error() string { return e.err.Error() }
 func (e *transientError) Unwrap() error { return e.err }
 
-// Do runs a GraphQL query or mutation and decodes `data` into out.
+// Do runs a GraphQL query or mutation against the store named on ctx (see
+// WithShop) and decodes `data` into out.
 //
-//   - 401: the app was uninstalled (or the token revoked). The token is dropped
-//     and ErrNotConnected returned until the app is opened again.
+//   - 401: the app was uninstalled from that store (or the token revoked). Its
+//     token is dropped and ErrNotConnected returned until the app is opened
+//     there again.
 //   - THROTTLED or HTTP 429: nothing was executed, so it waits and retries.
 //   - 5xx or a network error: Shopify may or may not have run the request.
 //     Queries are retried with backoff. Mutations only when they carry an
 //     @idempotent key, because resending e.g. productCreate could create the
 //     product twice.
 func (c *Client) Do(ctx context.Context, query string, variables map[string]any, out any) error {
+	shop, ok := ShopFrom(ctx)
+	if !ok {
+		return ErrNoShop
+	}
 	retrySafe := isRetrySafe(query)
 	throttleRetries, transientRetries := 0, 0
 	for {
-		res, err := c.send(ctx, query, variables)
+		res, err := c.send(ctx, shop, query, variables)
 		if errors.Is(err, errUnauthorized) {
-			c.tokens.Forget()
+			c.tokens.Forget(shop)
 			return ErrNotConnected
 		}
 		var transient *transientError
@@ -134,8 +142,8 @@ func (c *Client) Do(ctx context.Context, query string, variables map[string]any,
 	}
 }
 
-func (c *Client) send(ctx context.Context, query string, variables map[string]any) (*graphqlResponse, error) {
-	token, err := c.tokens.Token(c.shop)
+func (c *Client) send(ctx context.Context, shop, query string, variables map[string]any) (*graphqlResponse, error) {
+	token, err := c.tokens.Token(shop)
 	if err != nil {
 		return nil, err
 	}
@@ -143,7 +151,7 @@ func (c *Client) send(ctx context.Context, query string, variables map[string]an
 	if err != nil {
 		return nil, err
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.endpoint, bytes.NewReader(body))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.endpoint(shop), bytes.NewReader(body))
 	if err != nil {
 		return nil, err
 	}

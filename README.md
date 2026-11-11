@@ -5,9 +5,9 @@
 >
 > It's meant for agencies, developers and e-commerce managers who want one or more quick services up and running: "when X happens, do Y" in the store, without a database or Redis to run.
 >
-> Building an app that needs webhooks, a database, Redis caching, background jobs and queues, billing, multiple stores or a full admin UI? Start from a full app template instead.
+> Building an app that needs webhooks, a database, Redis caching, background jobs and queues, billing, unrelated stores (public distribution) or a full admin UI? Start from a full app template instead.
 
-A small Go service that holds one store's Admin API access token and exposes a few endpoints of your own. No admin UI, no database, no Redis. About 25 MB image, about 8 MB RAM.
+A small Go service that holds one store's Admin API access token (or one per store of a Plus organisation, see [Several stores](#several-stores-one-plus-organisation)) and exposes a few endpoints of your own. No admin UI, no database, no Redis. About 25 MB image, about 8 MB RAM.
 
 Use it when you just need something like:
 
@@ -29,7 +29,7 @@ Storefront ─▶ App Proxy (signed by Shopify) ────┘
 
 **Shopify hiccups.** Throttling, 429s, 5xx answers and network errors are retried with backoff. Mutations are only resent after a 5xx or network error when they carry an `@idempotent` key, so a retry can never create a product twice.
 
-**The access token.** When the app is opened in the admin, the service exchanges the admin's session token for the store's offline access token. It's kept in memory and in one encrypted file (`$DATA_DIR/shopify-token.enc`, AES-256-GCM, keyed by the client secret), so it survives restarts and deploys. Every opening exchanges again, so newly approved scopes apply.
+**The access token.** When the app is opened in the admin, the service exchanges the admin's session token for that store's offline access token. It's kept in memory and in one encrypted file (`$DATA_DIR/shopify-token.enc`, AES-256-GCM, keyed by the client secret), so it survives restarts and deploys. Every opening exchanges again, so newly approved scopes apply.
 
 ## Setup
 
@@ -72,7 +72,7 @@ Custom apps are installed with a link from the [Partner Dashboard](https://partn
 
 1. **App distribution → All apps →** your app.
 2. **Choose distribution → Custom distribution** (this can't be undone for that app).
-3. Enter the store's domain, e.g. `your-store.myshopify.com`. Leave "Allow multi-store install" off unless it's for a Plus organisation.
+3. Enter the store's domain, e.g. `your-store.myshopify.com`. Leave "Allow multi-store install" off unless it's for a Plus organisation (then see [Several stores](#several-stores-one-plus-organisation)).
 4. **Generate link** and open it while logged in to the store's admin (or send it to the store owner).
 5. Check the scopes and click **Install**.
 
@@ -92,9 +92,21 @@ curl -X POST localhost:8080/api/example/products \
   -H "Authorization: Bearer $API_KEY" -d '{"title": "Demo Hoodie"}'
 ```
 
+## Several stores (one Plus organisation)
+
+A custom app with **Allow multi-store install** on can be installed on every store of one Plus organisation. The stores share the client ID and secret; each store gets its own access token. One running service handles them all:
+
+1. List the stores in `SHOPIFY_SHOPS=store-one.myshopify.com,store-two.myshopify.com` (instead of, or next to, `SHOPIFY_SHOP`). Stores that aren't listed are refused.
+2. Install the app on each store and open it there once. Each opening stores that store's token in the same encrypted file; the log shows `[Install] Connected` with the shop.
+3. Calls then work on the right store:
+   - **`/proxy/...`** uses the store the request came through. Shopify signs the shop into every App Proxy request, so there's nothing to send.
+   - **`/api/...`** takes the store in an `X-Shopify-Shop-Domain: store-two.myshopify.com` header. In Flow: `{{shop.myshopifyDomain}}`. Without the header the call is refused (400) when several stores are configured.
+
+Uninstalling the app from one store drops only that store's token. In a handler nothing changes: `h.Admin.Do(r.Context(), ...)` reaches the store the request is for.
+
 ## Your own endpoints
 
-1. Copy `internal/handlers/example_products.go`: validate input, call `h.Admin.Do(ctx, query, vars, &out)`, write JSON.
+1. Copy `internal/handlers/example_products.go`: validate input, call `h.Admin.Do(r.Context(), query, vars, &out)`, write JSON. The request's context carries the store.
 2. Mount it in `endpoints` in `cmd/server/main.go` (served under `/api` and `/proxy`).
 3. Add the scopes to the app, release, open the app once.
 4. Delete the example.

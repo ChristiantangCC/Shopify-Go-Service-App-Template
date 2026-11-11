@@ -17,6 +17,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -25,6 +26,7 @@ import (
 
 // Caller is what a verified App Proxy request tells about who is calling.
 type Caller struct {
+	// Shop is the store the request came through, one of VerifyOptions.Shops.
 	Shop string
 	// CustomerID is the logged-in storefront customer's numeric id, "" when anonymous.
 	CustomerID string
@@ -64,8 +66,8 @@ func Signature(query url.Values, secret string) string {
 // VerifyOptions configures Verify.
 type VerifyOptions struct {
 	Secret string
-	// Shop is the only store whose requests are accepted.
-	Shop string
+	// Shops are the only stores whose requests are accepted.
+	Shops []string
 	// MaxAge is how old the signed timestamp may be (replay protection).
 	MaxAge time.Duration
 	Logger *slog.Logger
@@ -74,7 +76,7 @@ type VerifyOptions struct {
 }
 
 // Verify is middleware that lets a request through only when it carries a
-// valid, fresh App Proxy signature for the configured shop. Anything else gets
+// valid, fresh App Proxy signature for one of the configured shops. Anything else gets
 // 401 without detail.
 func Verify(opts VerifyOptions) func(http.Handler) http.Handler {
 	now := opts.Now
@@ -99,7 +101,8 @@ func Verify(opts VerifyOptions) func(http.Handler) http.Handler {
 				reject("bad signature")
 				return
 			}
-			if query.Get("shop") != opts.Shop {
+			shop := query.Get("shop")
+			if !slices.Contains(opts.Shops, shop) {
 				reject("other shop")
 				return
 			}
@@ -113,7 +116,7 @@ func Verify(opts VerifyOptions) func(http.Handler) http.Handler {
 				return
 			}
 
-			caller := Caller{Shop: opts.Shop, CustomerID: query.Get("logged_in_customer_id")}
+			caller := Caller{Shop: shop, CustomerID: query.Get("logged_in_customer_id")}
 			next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), callerKey{}, caller)))
 		})
 	}

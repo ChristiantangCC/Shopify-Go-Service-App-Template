@@ -32,7 +32,7 @@ done
 printf '\n\n  App URL:  \033[1;36m%s\033[0m\n\n' "$url"
 
 save() { echo "$1=$2" >>.env; export "$1=$2"; }
-[ -n "${SHOPIFY_SHOP:-}" ] || { read -rp "Store (example.myshopify.com): " v; save SHOPIFY_SHOP "$v"; }
+[ -n "${SHOPIFY_SHOP:-}${SHOPIFY_SHOPS:-}" ] || { read -rp "Store (example.myshopify.com): " v; save SHOPIFY_SHOP "$v"; }
 [ -n "${SHOPIFY_CLIENT_ID:-}" ] || { read -rp "Client ID: " v; save SHOPIFY_CLIENT_ID "$v"; }
 [ -n "${SHOPIFY_CLIENT_SECRET:-}" ] || { read -rsp "Client secret (hidden): " v; echo; save SHOPIFY_CLIENT_SECRET "$v"; }
 [ -n "${API_KEY:-}" ] || save API_KEY "$(openssl rand -hex 32)"

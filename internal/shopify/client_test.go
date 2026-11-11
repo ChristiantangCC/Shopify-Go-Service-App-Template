@@ -9,6 +9,11 @@ import (
 	"time"
 )
 
+const testShop = "example-shop.myshopify.com"
+
+// forShop is a request context for the test store.
+func forShop() context.Context { return WithShop(context.Background(), testShop) }
+
 // testClient returns a connected client that talks to a server answering with
 // the given status codes in turn (200 with an empty data object at the end).
 func testClient(t *testing.T, statuses ...int) (*Client, *atomic.Int32) {
@@ -31,8 +36,8 @@ func testClient(t *testing.T, statuses ...int) (*Client, *atomic.Int32) {
 	if err := tokens.Save("example-shop.myshopify.com", "shpat_abc"); err != nil {
 		t.Fatal(err)
 	}
-	client := NewClient("example-shop.myshopify.com", "2026-07", tokens)
-	client.endpoint = server.URL
+	client := NewClient("2026-07", tokens)
+	client.endpoint = func(string) string { return server.URL }
 	client.backoff = func(int) time.Duration { return time.Millisecond }
 	return client, &calls
 }
@@ -60,7 +65,7 @@ func TestDoRetries(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			client, calls := testClient(t, tt.statuses...)
-			err := client.Do(context.Background(), tt.document, nil, nil)
+			err := client.Do(forShop(), tt.document, nil, nil)
 			if (err != nil) != tt.wantErr || calls.Load() != tt.wantCalls {
 				t.Fatalf("err %v after %d calls, want error %v after %d", err, calls.Load(), tt.wantErr, tt.wantCalls)
 			}
@@ -70,10 +75,49 @@ func TestDoRetries(t *testing.T) {
 
 func TestDoUnauthorizedForgetsToken(t *testing.T) {
 	client, _ := testClient(t, 401)
-	if err := client.Do(context.Background(), `query { shop { name } }`, nil, nil); err != ErrNotConnected {
+	if err := client.Do(forShop(), `query { shop { name } }`, nil, nil); err != ErrNotConnected {
 		t.Fatalf("got %v, want ErrNotConnected", err)
 	}
 	if client.tokens.Connected("example-shop.myshopify.com") {
 		t.Fatal("token should be dropped after a 401")
+	}
+}
+
+func TestDoUsesEachStoresOwnEndpointAndToken(t *testing.T) {
+	sent := map[string]string{}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		sent[r.URL.Query().Get("shop")] = r.Header.Get("X-Shopify-Access-Token")
+		_, _ = w.Write([]byte(`{"data":{}}`))
+	}))
+	t.Cleanup(server.Close)
+
+	tokens, _ := NewTokenStore(t.TempDir(), "secret")
+	_ = tokens.Save("one.myshopify.com", "shpat_one")
+	_ = tokens.Save("two.myshopify.com", "shpat_two")
+	client := NewClient("2026-07", tokens)
+	client.endpoint = func(shop string) string { return server.URL + "?shop=" + shop }
+
+	for _, shop := range []string{"one.myshopify.com", "two.myshopify.com"} {
+		if err := client.Do(WithShop(context.Background(), shop), `query { shop { name } }`, nil, nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if sent["one.myshopify.com"] != "shpat_one" || sent["two.myshopify.com"] != "shpat_two" {
+		t.Fatalf("tokens sent per store: %v", sent)
+	}
+	if err := client.Do(WithShop(context.Background(), "three.myshopify.com"), `query { shop { name } }`, nil, nil); err != ErrNotConnected {
+		t.Fatalf("store without token: got %v, want ErrNotConnected", err)
+	}
+	if err := client.Do(context.Background(), `query { shop { name } }`, nil, nil); err != ErrNoShop {
+		t.Fatalf("context without store: got %v, want ErrNoShop", err)
+	}
+}
+
+func TestDoUnauthorizedKeepsOtherStoresConnected(t *testing.T) {
+	client, _ := testClient(t, 401)
+	_ = client.tokens.Save("other.myshopify.com", "shpat_other")
+	_ = client.Do(forShop(), `query { shop { name } }`, nil, nil)
+	if client.tokens.Connected(testShop) || !client.tokens.Connected("other.myshopify.com") {
+		t.Fatal("a 401 should drop only that store's token")
 	}
 }
